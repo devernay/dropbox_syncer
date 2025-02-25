@@ -58,6 +58,7 @@ def with_retry(
     Args:
         max_attempts: Maximum number of retry attempts
         initial_delay: Initial delay between retries in seconds
+        max_delay: Maximum delay between retries in seconds
         backoff_factor: Multiplicative factor for exponential backoff
         exceptions: Tuple of exceptions to catch and retry
     """
