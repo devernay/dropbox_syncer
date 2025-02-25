@@ -38,6 +38,62 @@ import dropbox
 from dropbox import DropboxOAuth2FlowNoRedirect
 from dropbox.files import FileMetadata, FolderMetadata
 from tqdm import tqdm
+from functools import wraps
+import time
+from typing import Callable, TypeVar, Any
+import random
+
+T = TypeVar('T')
+
+def with_retry(
+    max_attempts: int = 3,
+    initial_delay: float = 1.0,
+    max_delay: float = 30.0,
+    backoff_factor: float = 2.0,
+    exceptions: tuple = (ConnectionResetError, dropbox.exceptions.ApiError)
+) -> Callable:
+    """
+    Decorator that implements exponential backoff retry logic.
+    
+    Args:
+        max_attempts: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+        backoff_factor: Multiplicative factor for exponential backoff
+        exceptions: Tuple of exceptions to catch and retry
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        def wrapper(self, *args, **kwargs) -> T:
+            last_exception = None
+            delay = initial_delay
+
+            for attempt in range(max_attempts):
+                try:
+                    return func(self, *args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt == max_attempts - 1:
+                        # If this was the last attempt, re-raise the exception
+                        raise
+                    
+                    # Calculate next delay with jitter
+                    jitter = random.uniform(0.8, 1.2)
+                    next_delay = min(delay * backoff_factor * jitter, max_delay)
+                    
+                    self._log_message(
+                        f"Attempt {attempt + 1}/{max_attempts} failed: {str(e)}. "
+                        f"Retrying in {delay:.2f} seconds..."
+                    )
+                    
+                    time.sleep(delay)
+                    delay = next_delay
+            
+            # This should never be reached due to the raise in the last iteration
+            raise last_exception
+
+        return wrapper
+    return decorator
+
 
 class DropboxSyncer:
     def __init__(
@@ -162,7 +218,7 @@ class DropboxSyncer:
         Returns:
             bool: True if path is valid, False otherwise
         """
-        path_components = str(path).split(path_sep)
+        components = str(path).split(path_sep)
         if any(self._has_forbidden_chars(component) for component in components):
             self._log_message(f"Skipped file due to forbidden characters: {path}")
             return False
@@ -249,6 +305,38 @@ class DropboxSyncer:
         self._log_message(message)
 
 
+    @with_retry(max_attempts=3, initial_delay=1.0, max_delay=30.0)
+    def _upload_file(self, local_path: Path, dropbox_path: str, dry_run: bool = False) -> None:
+        """Upload a file to Dropbox with retry logic."""
+        if dry_run:
+            self._log_message(f"Would upload {local_path} to {dropbox_path}")
+            return
+
+        self._log_message(f"Uploading {local_path} to {dropbox_path}")
+        try:
+            with open(local_path, 'rb') as f:
+                self.dbx.files_upload(
+                    f.read(),
+                    dropbox_path,
+                    mode=dropbox.files.WriteMode.overwrite
+                )
+        except Exception as e:
+            self._log_message(f"Error uploading {local_path}: {str(e)}")
+            raise
+
+    @with_retry(max_attempts=3, initial_delay=1.0, max_delay=30.0)
+    def _download_file(self, local_path: Path, dropbox_path: str, dry_run: bool = False) -> None:
+        """Download a file from Dropbox with retry logic."""
+        if dry_run:
+            self._log_message(f"Would download {dropbox_path} to {local_path}")
+            return
+
+        self._log_message(f"Downloading {dropbox_path} to {local_path}")
+        try:
+            self.dbx.files_download_to_file(str(local_path), dropbox_path)
+        except Exception as e:
+            self._log_message(f"Error downloading {dropbox_path}: {str(e)}")
+            raise
 
     def sync(self, dry_run: bool=False, download: bool=True, upload: bool=False) -> None:
         """Perform the two-way synchronization between Dropbox and a local folder."""
@@ -364,33 +452,18 @@ class DropboxSyncer:
                             if remote_mtime > local_mtime:
                                 if download:
                                     # Remote is newer - download
-                                    self._log_message(f"Downloading {dropbox_path} - Remote version newer")
-                                    if dry_run:
-                                        print(f"Downloading {dropbox_path} - Remote version newer")
-                                    else:
-                                        self.dbx.files_download_to_file(str(local_path), dropbox_path)
+                                    self._download_file(local_path, dropbox_path, dry_run)
                             else:
                                 if upload:
                                     # Local is newer - upload
-                                    self._log_message(f"Uploading {local_path} - Local version newer")
-                                    if dry_run:
-                                        print(f"Uploading {local_path} - Local version newer")
-                                    else:
-                                        with open(local_path, 'rb') as f:
-                                            self.dbx.files_upload(f.read(), dropbox_path, 
-                                                                mode=dropbox.files.WriteMode.overwrite)
+                                    self._upload_file(local_path, dropbox_path, dry_run)
                         
                         # Remove from remote_files dict to track processed files
                         del remote_files[dropbox_path]
                     else:
                         if upload:
                             # File exists only locally - upload it
-                            self._log_message(f"Uploading new file {local_path}")
-                            if dry_run:
-                                print(f"Uploading new file {local_path}")
-                            else:
-                                with open(local_path, 'rb') as f:
-                                    self.dbx.files_upload(f.read(), dropbox_path)
+                            self._upload_file(local_path, dropbox_path, dry_run)
                     
                     pbar.update(1)
 
@@ -408,11 +481,7 @@ class DropboxSyncer:
                     # Create parent directories if needed
                     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-                    self._log_message(f"Downloading new file {dropbox_path}")
-                    if dry_run:
-                        print(f"Downloading new file {dropbox_path}")
-                    else:
-                        self.dbx.files_download_to_file(str(local_path), dropbox_path)
+                    self._download_file(local_path, dropbox_path, dry_run)
                 pbar.update(1)
 
         print(f"Ended two-way synchronization between {self.remote_folder} and {self.local_folder}")
