@@ -22,3 +22,45 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dropbox_syncer.py"]
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+line_length = 100
+profile = "black"
+
+[tool.mypy]
+warn_return_any = true
+warn_unused_configs = true
+exclude = [
+    "^__pycache__/.*",
+]
+
+[tool.pyright]
+# ["off", "basic", "standard", "strict"]
+typeCheckingMode = "basic"
+exclude = ["**/__pycache__",
+]
+defineConstant = { DEBUG = true }
+
+reportMissingImports = "warning"
+reportMissingTypeStubs = false
+reportPrivateImportUsage = false
+
+pythonVersion = "3.10"
+pythonPlatform = "Linux"
+
+
+[tool.ruff]
+line-length = 100
+respect-gitignore = false
+lint.select = [
+    "E",  # pycodestyle errors.
+    "F",  # Pyflakes rules.
+    "I",  # isort formatting.
+    "PLC",  # Pylint convention warnings.
+    "PLE",  # Pylint errors.
+    "PLR",  # Pylint refactor recommendations.
+    "PLW",  # Pylint warnings.
+]
