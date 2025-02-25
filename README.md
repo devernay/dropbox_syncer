@@ -47,3 +47,8 @@ options:
   -O, --overwrite       If file exists at both places but differ, overwrite either version based on their
                         modification time.
 ```
+
+The first time you run the script, you have to pass the App key and the App secret on the command-line.
+The script will ask you to authenticate using a browser, and then store credentials in the auth file.
+Subsequent runs will use the auth file.  Make sure that the auth file is stored in a safe place, as
+it gives access to your Dropbox.

@@ -31,8 +31,6 @@ from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from typing import Callable, Dict, Optional, Set, Tuple, TypeVar
-from typing import Optional, BinaryIO, Iterator
-import io
 
 import dropbox
 import requests
@@ -137,6 +135,42 @@ class DropboxSyncer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = f"dropbox_sync_log_{timestamp}.txt"
         self.dbx = self._authenticate()
+        pass
+
+    def close(self) -> None:
+        """Close all resources used by the DropboxSyncer instance."""
+        try:
+            # Close the Dropbox client if it exists
+            if hasattr(self, "dbx") and self.dbx is not None:
+                self.dbx.close()
+                self.dbx = None
+
+            # Close the log file if it's open
+            # First check if we have a log file attribute
+            if hasattr(self, "log_file") and self.log_file:
+                # Since we open/close the log file for each write in _log_message,
+                # we don't need to explicitly close it here, but we can ensure
+                # a final message is written
+                self._log_message("Closing DropboxSyncer instance")
+
+        except Exception as e:
+            # Log any errors during cleanup but don't raise them
+            if hasattr(self, "_log_message"):
+                self._log_message(f"Error during cleanup: {str(e)}")
+            print(f"Error during cleanup: {str(e)}")
+
+        finally:
+            # Clear any other resources or references
+            if hasattr(self, "_case_sensitive"):
+                delattr(self, "_case_sensitive")
+
+    def __enter__(self):
+        """Allow using DropboxSyncer as a context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Ensure resources are cleaned up when exiting the context."""
+        self.close()
 
     def _read_auth_file(self) -> Dict[str, str]:
         try:
@@ -395,86 +429,6 @@ class DropboxSyncer:
             self._log_message(f"Error uploading {local_path}: {str(e)}")
             raise
 
-    # Note: the following is not working, but it may not be useful anyway.
-    def _download_file_chunked_broken(
-        self, local_path: Path, dropbox_path: str, reason: Optional[str] = None
-    ) -> None:
-        """Download a large file in chunks with retry logic."""
-        message = f"Downloading {dropbox_path} to {local_path}"
-        if reason is not None:
-            message += f" ({reason})"
-        if self.dry_run:
-            self._log_message("[dry run] " + message)
-            return
-        self._log_message(message)
-
-        try:
-            # Create parent directories if needed
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-
-            try:
-                # Get file metadata first
-                metadata = self.dbx.files_get_metadata(dropbox_path)
-                if not isinstance(metadata, dropbox.files.FileMetadata):
-                    raise ValueError(f"Path is not a file: {dropbox_path}")
-
-                file_size = metadata.size
-
-                with open(local_path, "wb") as f:
-                    if file_size <= self.DOWNLOAD_CHUNK_SIZE:
-                        # Small file - download directly
-                        metadata, response = self.dbx.files_download(dropbox_path)
-                        f.write(response.content)
-                    else:
-                        with tqdm(
-                            total=file_size, desc="Downloading", unit="B", unit_scale=True
-                        ) as pbar:
-                            # Large file - download in chunks with progress bar
-                            for chunk_start in range(0, file_size, self.DOWNLOAD_CHUNK_SIZE):
-                                chunk_end = min(
-                                    chunk_start + self.DOWNLOAD_CHUNK_SIZE - 1, file_size - 1
-                                )
-                                ## range_start and range_end not available in the Python API v2
-                                # metadata, response = self.dbx.files_download(
-                                #     dropbox_path,
-                                #     range_start=chunk_start,
-                                #     range_end=chunk_end
-                                # )
-
-                                # Get download link first
-                                metadata, response = self.dbx.files_download(dropbox_path)
-                                download_url = response.url
-
-                                # Download chunk with range header
-                                headers = {"Range": f"bytes={chunk_start}-{chunk_end}"}
-                                response = self.dbx.session.get(download_url, headers=headers)
-                                response.raise_for_status()
-
-                                chunk_data = response.content
-                                f.write(chunk_data)
-                                pbar.update(len(chunk_data))
-
-            except dropbox.exceptions.ApiError as e:
-                if (
-                    isinstance(e.error, dropbox.files.DownloadError)
-                    and e.error.is_unsupported_file()
-                ):
-                    try:
-                        # Try to export the file instead
-                        self.dbx.files_export_to_file(str(local_path), dropbox_path)
-                        return
-                    except dropbox.exceptions.ApiError as export_error:
-                        self._log_message(f"Error exporting {dropbox_path}: {str(export_error)}")
-                        raise
-                self._log_message(f"Error downloading {dropbox_path}: {str(e)}")
-                raise
-
-        except Exception as e:
-            # Clean up partial downloads on error
-            if local_path.exists():
-                local_path.unlink()
-            raise
-
     @with_retry(max_attempts=3, initial_delay=1.0, max_delay=30.0)
     def _upload_file(
         self, local_path: Path, dropbox_path: str, reason: Optional[str] = None
@@ -505,9 +459,6 @@ class DropboxSyncer:
         self, local_path: Path, dropbox_path: str, reason: Optional[str] = None
     ) -> None:
         """Download a file from Dropbox with retry logic."""
-
-        # if self.chunked:
-        #    return self._download_file_chunked(local_path, dropbox_path, reason)
 
         message = f"Downloading {dropbox_path} to {local_path}"
         if reason is not None:
@@ -748,18 +699,24 @@ def main():
     if not (args.download or args.upload):
         parser.error("No action requested, add -D and/or -U options")
 
-    syncer = DropboxSyncer(
-        auth_file=args.auth_file,
-        remote_folder=args.remote_folder,
-        local_folder=args.local_folder,
-        app_key=args.app_key,
-        app_secret=args.app_secret,
-        dry_run=args.dry_run,
-        download=args.download,
-        upload=args.upload,
-        overwrite=args.overwrite,
-    )
-    syncer.sync()
+    syncer = None
+    try:
+        with DropboxSyncer(
+            auth_file=args.auth_file,
+            remote_folder=args.remote_folder,
+            local_folder=args.local_folder,
+            app_key=args.app_key,
+            app_secret=args.app_secret,
+            dry_run=args.dry_run,
+            download=args.download,
+            upload=args.upload,
+            overwrite=args.overwrite,
+        ) as syncer:
+            syncer.sync()
+    except Exception as e:
+        if syncer is not None:
+            syncer._log_message(f"Unexpected error: {e}")
+        print(f"Unexpected error: {e}")
 
 
 if __name__ == "__main__":
